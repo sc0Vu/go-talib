@@ -17,6 +17,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"io"
+	"bufio"
+	"encoding/json"
 )
 
 func ok(t *testing.T, err error) {
@@ -51,6 +54,10 @@ var (
 
 	// testCrossover1 = []float64{1, 3, 2, 4, 8, 6, 7}
 	// testCrossover2 = []float64{1, 5, 1, 4, 5, 6, 7}
+
+	pythonIn  io.WriteCloser
+    pythonOut *bufio.Reader
+    workerCmd *exec.Cmd
 )
 
 func a2s(a []float64) string { // go float64 array to python list initializer string
@@ -65,7 +72,7 @@ func round(input float64) float64 {
 }
 
 func compare(t *testing.T, goResult []float64, taCall string) {
-	pyprog := fmt.Sprintf(`import talib,numpy
+	pyprog := fmt.Sprintf(`
 testOpen = numpy.array(%s)
 testHigh = numpy.array(%s)
 testLow = numpy.array(%s)
@@ -73,11 +80,15 @@ testClose = numpy.array(%s)
 testVolume = numpy.array(%s)
 testRand = numpy.array(%s)
 %s
-print(' '.join([str(p) for p in result]).replace('nan','0.0'))`,
+result=' '.join([str(p) for p in result]).replace('nan','0.0')`,
 		a2s(testOpen), a2s(testHigh), a2s(testLow), a2s(testClose), a2s(testVolume), a2s(testRand), taCall)
 
-	//fmt.Println(pyprog)
-	pyOut, err := exec.Command("python", "-c", pyprog).Output()
+	payload := map[string]string{
+		"script": pyprog,
+	}
+	jsonPayload, _ := json.Marshal(payload)
+	fmt.Fprintln(pythonIn, string(jsonPayload))
+	pyOut, err := pythonOut.ReadString('\n')
 	ok(t, err)
 
 	var pyResult []float64
@@ -121,18 +132,24 @@ print(' '.join([str(p) for p in result]).replace('nan','0.0'))`,
 	}
 }
 
-// Ensure that python and talib are installed and in the PATH
+// Start python worker
 func TestMain(m *testing.M) {
-	pyout, err := exec.Command("python", "-c", "import talib; print('success')").Output()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
-	if string(pyout[0:7]) != "success" {
-		fmt.Println("python and talib must be installed to run tests")
-		os.Exit(-1)
-	}
-	os.Exit(m.Run())
+    workerCmd = exec.Command("python3.10", "worker.py")
+    pythonIn, _ = workerCmd.StdinPipe()
+    stdout, _ := workerCmd.StdoutPipe()
+    pythonOut = bufio.NewReader(stdout)
+
+    if err := workerCmd.Start(); err != nil {
+        fmt.Printf("Could not start Python: %v\n", err)
+        os.Exit(1)
+    }
+
+    code := m.Run()
+
+    pythonIn.Close()
+    workerCmd.Process.Kill()
+
+    os.Exit(code)
 }
 
 // Test all the functions
